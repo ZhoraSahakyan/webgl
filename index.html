@@ -1,0 +1,291 @@
+<html>
+<head>
+<style>
+body {
+	  margin: 0;
+}
+</style>
+</head>
+<body>
+<script src="https://unpkg.com/three/build/three.min.js"></script>
+<script src="https://unpkg.com/three/examples/js/loaders/GLTFLoader.js"></script>
+<script src="https://unpkg.com/three/examples/js/loaders/RGBELoader.js"></script>
+<script src="https://unpkg.com/three/examples/js/shaders/HorizontalBlurShader.js"></script>
+<script src="https://unpkg.com/three/examples/js/shaders/VerticalBlurShader.js"></script>
+<script>
+const camera = new THREE.PerspectiveCamera( 70, 1, 0.5, 1500 );
+
+const scene = new THREE.Scene();
+const mixer = new THREE.AnimationMixer( scene );
+
+new THREE.RGBELoader().load( 'env.hdr', function( texture ) {
+    //texture.encoding = THREE.sRGBEncoding;
+    texture.mapping = THREE.EquirectangularReflectionMapping; //THREE.CubeReflectionMapping; //THREE.EquirectangularReflectionMapping;
+    scene.environment = texture;
+} );
+
+const names = ['Line023', 'Line020', 'Line010', 'Line024', 'Line017', 'Line007', 'Line013'];
+
+let duration = 0;
+
+new THREE.GLTFLoader().load( 'Tops.1.glb', function( gltf ) {
+    console.log( gltf );
+
+    scene.add( gltf.scene );
+    /*
+    scene.add( new THREE.HemisphereLight( 0xffffff, 0x777777, 0.6 ) );
+    */
+
+    gltf.scene.traverse( function( object ) {
+        const index = names.indexOf( object.name );
+        if( index > -1 ) {
+            object.material.map = new THREE.TextureLoader().load( 'images/' + index + '.jpg' );
+            object.material.map.wrapS = THREE.RepeatWrapping;
+            object.material.map.wrapT = THREE.RepeatWrapping;
+            object.material.encoding = THREE.sRGBEncoding;
+            object.material.roughness = 0.2;
+            /*
+            object.material.onBeforeCompile = function( hack ) {
+                hack.vertexShader = hack.vertexShader.replace(
+                    /}$/, `
+                        vUv.y = position.z;
+                        vUv.x = atan( position.y, position.x ) / 6.2831853;
+                    }`
+                );
+            };
+            */
+        }
+    } );
+
+    gltf.scene.updateMatrixWorld( true );
+
+    names.forEach( function( name, index ) {
+        const object = gltf.scene.getObjectByName( name );
+        const box = new THREE.Box3();
+        box.setFromObject( object );
+        const parent = new THREE.Group();
+        box.getCenter( parent.position );
+        object.position.sub( parent.position );
+        object.parent.add( parent );
+        parent.add( object );
+    } );
+
+    //gltf.scene.getObjectByName( 'ArnoldLight002' ).add( new THREE.DirectionalLight );
+
+    gltf.scene.getObjectByName( 'PhysCamera001' ).add( camera );
+    camera.rotation.set( -1.66, 0, 0 );
+
+    duration = gltf.animations.reduce( (a, b) => a.duration > b.duration ? a : b ).duration;
+
+    gltf.animations.forEach( function( clip ) {
+        clip.duration = duration;
+        const action = mixer.clipAction( clip );
+        action.play();
+    } );
+
+    mixer.update( 0 );
+    makeShadow();
+} );
+
+const renderer = new THREE.WebGLRenderer( { antialias: true } );
+renderer.outputEncoding = THREE.sRGBEncoding;
+renderer.setPixelRatio( window.devicePixelRatio );
+renderer.setAnimationLoop( animation );
+document.body.appendChild( renderer.domElement );
+
+// resize
+
+function getSize() {
+    // Test_01.mov was 1000 x 1000
+    const size = Math.min( window.innerWidth, window.innerHeight );
+    return { w: size, h: size };
+}
+
+function resize() {
+    const { w, h } = getSize();
+    renderer.setSize( w, h );
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+}
+window.addEventListener( 'resize', resize );
+resize();
+
+// animation
+
+let wheelY = 0, maxWheelY = 3000, targetTime = 0;
+document.body.addEventListener( 'wheel', function( event ) {
+    event.preventDefault();
+    wheelY += event.deltaY;
+    wheelY = Math.max( 0, Math.min( maxWheelY - 1, wheelY ) );
+} );
+
+function animation( time ) {
+
+    //mixer.update( 1/60 );
+
+    targetTime *= 0.8; targetTime += 0.2 * wheelY * duration / maxWheelY; mixer.setTime( targetTime );
+
+    names.forEach( function( name, index ) {
+        const object = scene.getObjectByName( name );
+        if( object ) object.parent.rotation.y -= 0.05;
+    } );
+
+	renderer.render( scene, camera );
+
+}
+
+// https://github.com/mrdoob/three.js/blob/master/examples/webgl_shadow_contact.html
+
+let shadowGroup, renderTarget, renderTargetBlur, shadowCamera, cameraHelper, depthMaterial, horizontalBlurMaterial, verticalBlurMaterial;
+
+// renderTarget --> blurPlane (horizontalBlur) --> renderTargetBlur --> blurPlane (verticalBlur) --> renderTarget
+function blurShadow( amount ) {
+
+    blurPlane.visible = true;
+
+    // blur horizontally and draw in the renderTargetBlur
+    blurPlane.material = horizontalBlurMaterial;
+    blurPlane.material.uniforms.tDiffuse.value = renderTarget.texture;
+    horizontalBlurMaterial.uniforms.h.value = amount * 1 / 256;
+
+    renderer.setRenderTarget( renderTargetBlur );
+    renderer.render( blurPlane, shadowCamera );
+
+    // blur vertically and draw in the main renderTarget
+    blurPlane.material = verticalBlurMaterial;
+    blurPlane.material.uniforms.tDiffuse.value = renderTargetBlur.texture;
+    verticalBlurMaterial.uniforms.v.value = amount * 1 / 256;
+
+    renderer.setRenderTarget( renderTarget );
+    renderer.render( blurPlane, shadowCamera );
+
+    blurPlane.visible = false;
+
+}
+
+function makeShadow() {
+    const PLANE_WIDTH = 2.0;
+    const PLANE_HEIGHT = 2.0;
+    const CAMERA_HEIGHT = 0.1;
+
+    const state = {
+        shadow: {
+            blur: 1.1,
+            darkness: 0.1,
+            opacity: 1,
+        },
+        plane: {
+            //color: '#ffffff',
+            //opacity: 1,
+            color: 0,
+            opacity: 0,
+        },
+        showWireframe: !false,
+    };
+
+    shadowGroup = new THREE.Group();
+    shadowGroup.position.y = 0.0001;
+    scene.add( shadowGroup );
+
+    // the render target that will show the shadows in the plane texture
+    renderTarget = new THREE.WebGLRenderTarget( 512, 512 );
+    renderTarget.texture.generateMipmaps = false;
+
+    // the render target that we will use to blur the first render target
+    renderTargetBlur = new THREE.WebGLRenderTarget( 512, 512 );
+    renderTargetBlur.texture.generateMipmaps = false;
+
+
+    // make a plane and make it face up
+    const planeGeometry = new THREE.PlaneGeometry( PLANE_WIDTH, PLANE_HEIGHT ).rotateX( Math.PI / 2 );
+    const planeMaterial = new THREE.MeshBasicMaterial( {
+        map: renderTarget.texture,
+        opacity: state.shadow.opacity,
+        transparent: true,
+        depthWrite: false,
+    } );
+    plane = new THREE.Mesh( planeGeometry, planeMaterial );
+    // make sure it's rendered after the fillPlane
+    plane.renderOrder = 1;
+    shadowGroup.add( plane );
+
+    // the y from the texture is flipped!
+    plane.scale.y = - 1;
+
+    // the plane onto which to blur the texture
+    blurPlane = new THREE.Mesh( planeGeometry );
+    blurPlane.visible = false;
+    shadowGroup.add( blurPlane );
+
+    // the plane with the color of the ground
+    const fillPlaneMaterial = new THREE.MeshBasicMaterial( {
+        color: state.plane.color,
+        opacity: state.plane.opacity,
+        transparent: true,
+        depthWrite: false,
+    } );
+    fillPlane = new THREE.Mesh( planeGeometry, fillPlaneMaterial );
+    fillPlane.rotateX( Math.PI );
+    shadowGroup.add( fillPlane );
+
+    // the camera to render the depth material from
+    shadowCamera = new THREE.OrthographicCamera( - PLANE_WIDTH / 2, PLANE_WIDTH / 2, PLANE_HEIGHT / 2, - PLANE_HEIGHT / 2, 0, CAMERA_HEIGHT );
+    shadowCamera.rotation.x = Math.PI / 2; // get the camera to look up
+    shadowGroup.add( shadowCamera );
+
+    cameraHelper = new THREE.CameraHelper( shadowCamera );
+
+    // like MeshDepthMaterial, but goes from black to transparent
+    depthMaterial = new THREE.MeshDepthMaterial();
+    depthMaterial.userData.darkness = { value: state.shadow.darkness };
+    depthMaterial.onBeforeCompile = function ( shader ) {
+
+        shader.uniforms.darkness = depthMaterial.userData.darkness;
+        shader.fragmentShader = /* glsl */`
+            uniform float darkness;
+            ${shader.fragmentShader.replace(
+        'gl_FragColor = vec4( vec3( 1.0 - fragCoordZ ), opacity );',
+        'gl_FragColor = vec4( vec3( 0.0 ), ( 1.0 - fragCoordZ ) * darkness );'
+    )}
+        `;
+
+    };
+
+    depthMaterial.depthTest = false;
+    depthMaterial.depthWrite = false;
+
+    horizontalBlurMaterial = new THREE.ShaderMaterial( THREE.HorizontalBlurShader );
+    horizontalBlurMaterial.depthTest = false;
+
+    verticalBlurMaterial = new THREE.ShaderMaterial( THREE.VerticalBlurShader );
+    verticalBlurMaterial.depthTest = false;
+
+    // now render once.......
+
+    // force the depthMaterial to everything
+    scene.overrideMaterial = depthMaterial;
+
+    // set renderer clear alpha
+    const initialClearAlpha = renderer.getClearAlpha();
+    renderer.setClearAlpha( 0 );
+
+    // render to the render target to get the depths
+    renderer.setRenderTarget( renderTarget );
+    renderer.render( scene, shadowCamera );
+
+    // and reset the override material
+    scene.overrideMaterial = null;
+
+    blurShadow( state.shadow.blur );
+
+    // a second pass to reduce the artifacts
+    // (0.4 is the minimum blur amout so that the artifacts are gone)
+    blurShadow( state.shadow.blur * 0.4 );
+
+    renderer.setRenderTarget( null );
+    renderer.setClearAlpha( initialClearAlpha );
+
+}
+</script>
+</body>
+</html>
